@@ -1,0 +1,20 @@
+# Core LLM & Orchestration
+langsmith>=0.1.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-openai>=0.1.0
+langgraph>=0.1.0
+openai>=1.0.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.25.0
+scipy>=1.11.0
+
+# Token Management
+tiktoken>=0.6.0
+
+# Config & Environment
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
