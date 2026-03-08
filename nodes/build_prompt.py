@@ -30,7 +30,11 @@ def build_initial_prompt(state: TrafficPredictionState) -> dict:
     """
     log_node_entry(logger, "build_initial_prompt", state["iteration"])
 
-    p_exam  = build_p_exam()
+    # Preserve enriched p_exam if already set (e.g. by run_context_pipeline's
+    # in-context learning builder).  Only fall back to the static few-shot
+    # example when p_exam is absent or empty.
+    existing_p_exam = state.get("p_exam", "")
+    p_exam  = existing_p_exam if existing_p_exam else build_p_exam()
     p_input = build_p_input(state["x_t"], state["target_date"])
     p_ques  = build_p_ques()
 
@@ -39,7 +43,8 @@ def build_initial_prompt(state: TrafficPredictionState) -> dict:
         "build_initial_prompt",
         state["iteration"],
         parsed_output=(
-            f"p_exam={len(p_exam)} chars | "
+            f"p_exam={len(p_exam)} chars "
+            f"({'enriched' if existing_p_exam else 'static'}) | "
             f"p_input={len(p_input)} chars | "
             f"p_ques={len(p_ques)} chars"
         ),

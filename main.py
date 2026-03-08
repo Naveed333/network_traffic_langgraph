@@ -563,15 +563,27 @@ if __name__ == "__main__":
         logger.info("Results saved → %s", os.path.abspath(args.output))
 
     # Print a compact JSON summary to stdout for CI / scripting
-    compact = {
-        "final_mae":       results["final_mae"],
-        "final_rmse":      results["final_rmse"],
-        "final_mape":      results["final_mape"],
-        "total_iterations": results["total_iterations"],
-        "converged":       results["converged"],
-        "total_api_calls": results["total_api_calls"],
-        "total_tokens":    results["total_tokens_used"],
-        "mae_history":     results["mae_history"],
-    }
+    if results.get("mode") == "context_pipeline":
+        compact = {
+            "mode":            results["mode"],
+            "target_date":     results["target_date"],
+            "context_days":    results["context_days"],
+            "y_final":         results["y_final"],
+            "eval_dates":      results["eval_dates"],
+            "eval_mae_finals": results["eval_mae_finals"],
+            "total_api_calls": results["total_api_calls"],
+            "total_tokens":    results["total_tokens_used"],
+        }
+    else:
+        compact = {
+            "final_mae":        results["final_mae"],
+            "final_rmse":       results["final_rmse"],
+            "final_mape":       results["final_mape"],
+            "total_iterations": results["total_iterations"],
+            "converged":        results["converged"],
+            "total_api_calls":  results["total_api_calls"],
+            "total_tokens":     results["total_tokens_used"],
+            "mae_history":      results["mae_history"],
+        }
     print("\n" + json.dumps(compact, indent=2, default=str))
     sys.exit(0)
