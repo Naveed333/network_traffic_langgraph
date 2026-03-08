@@ -99,3 +99,112 @@ def build_p_ques() -> str:
         "predicted traffic (in Mbps) for hours 00 through 23, like this example:\n"
         "471.00, 398.50, 332.10, 299.40, ..., 503.80"
     )
+
+
+# ── Dynamic p_exam from converged evaluation contexts ─────────────────────────
+
+def build_p_exam_from_contexts(contexts: list) -> str:
+    """
+    Build a rich, dynamic p_exam from a list of converged evaluation contexts.
+
+    Each context is the result dict saved by run_pipeline() for one historical
+    day. Contexts are presented oldest → newest so the most recent lesson
+    (most relevant) is closest to the deployment prompt.
+
+    Token budget strategy:
+        - Most recent context  → full detail (all iterations)
+        - Older contexts       → condensed (initial + final only)
+
+    Args:
+        contexts: List of result dicts ordered oldest → newest.
+                  Each dict must contain:
+                    eval_date, x_t, ground_truth, y_hat_history,
+                    pfeed_history, prefine_history, mae_history,
+                    final_mae, converged, total_iterations
+
+    Returns:
+        Formatted string ready to replace the static p_exam in the prompt.
+    """
+    if not contexts:
+        return _FEW_SHOT_EXAMPLE.strip()
+
+    lines = [
+        "## In-Context Learning — Historical Prediction Lessons",
+        f"({len(contexts)} days evaluated; most recent lesson is most relevant)\n",
+    ]
+
+    for idx, ctx in enumerate(contexts):
+        is_most_recent = (idx == len(contexts) - 1)
+        day_num        = idx + 1
+        eval_date      = ctx.get("eval_date", f"Day {day_num}")
+        mae_history    = ctx.get("mae_history", [])
+        y_hat_history  = ctx.get("y_hat_history", [])
+        pfeed_history  = ctx.get("pfeed_history", [])
+        prefine_history= ctx.get("prefine_history", [])
+        x_t            = ctx.get("x_t", [])
+        final_mae      = ctx.get("final_mae", None)
+        total_iters    = ctx.get("total_iterations", len(y_hat_history) - 1)
+
+        lines.append(f"{'─' * 60}")
+        lines.append(
+            f"### Lesson {day_num}: {eval_date} "
+            f"({'Most Recent' if is_most_recent else 'Historical'})"
+        )
+
+        # Input data — always shown
+        if x_t:
+            x_t_str = " | ".join(
+                f"H{h:02d}:{v:.1f}" for h, v in enumerate(x_t)
+            )
+            lines.append(f"**Input (previous day hourly Mbps):** {x_t_str}")
+
+        if is_most_recent:
+            # ── Full detail for most recent day ───────────────────────────
+            for i, y_hat in enumerate(y_hat_history):
+                label    = "Initial Prediction ŷ₀" if i == 0 else f"Refined Prediction ŷ{i}"
+                mae_val  = f" → MAE: {mae_history[i]:.2f} Mbps" if i < len(mae_history) else ""
+                vals_str = ", ".join(f"{v:.2f}" for v in y_hat)
+                lines.append(f"**[Iter {i}] {label}:** {vals_str}{mae_val}")
+
+                if i < len(pfeed_history):
+                    # Truncate long feedback to first 300 chars for token budget
+                    feed = pfeed_history[i][:300].replace("\n", " ")
+                    lines.append(f"  ↳ Feedback: {feed}...")
+
+                if i < len(prefine_history):
+                    refine = prefine_history[i][:200].replace("\n", " ")
+                    lines.append(f"  ↳ Refinement instruction: {refine}")
+        else:
+            # ── Condensed for older days (initial + final only) ───────────
+            if y_hat_history:
+                y0_str = ", ".join(f"{v:.2f}" for v in y_hat_history[0])
+                lines.append(
+                    f"**Initial ŷ₀:** {y0_str}"
+                    + (f" → MAE: {mae_history[0]:.2f} Mbps" if mae_history else "")
+                )
+            if len(y_hat_history) > 1:
+                yf_str = ", ".join(f"{v:.2f}" for v in y_hat_history[-1])
+                lines.append(
+                    f"**Final  ŷ{len(y_hat_history)-1}:** {yf_str}"
+                    + (f" → MAE: {mae_history[-1]:.2f} Mbps" if mae_history else "")
+                )
+            if pfeed_history:
+                feed = pfeed_history[-1][:200].replace("\n", " ")
+                lines.append(f"  ↳ Key feedback: {feed}...")
+
+        # Convergence summary — always shown
+        converged_str = "✓ converged" if ctx.get("converged") else "✗ max iterations"
+        lines.append(
+            f"**Result:** {total_iters} refinement(s), "
+            f"final MAE={final_mae:.2f} Mbps, {converged_str}"
+        )
+        lines.append("")
+
+    lines.append(f"{'─' * 60}")
+    lines.append(
+        "Use the lessons above to guide your prediction. "
+        "Pay close attention to Lesson "
+        f"{len(contexts)} (most recent) as it reflects the latest traffic patterns.\n"
+    )
+
+    return "\n".join(lines)

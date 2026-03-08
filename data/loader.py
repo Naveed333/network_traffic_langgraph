@@ -84,6 +84,102 @@ def load_traffic_data(
     return x_t, ground_truth, target_str
 
 
+# ── Context-pipeline helpers ──────────────────────────────────────────────────
+
+def validate_context_dates(
+    filepath: str,
+    target_date: str,
+    context_days: int,
+) -> None:
+    """
+    Verify that all dates required for the context pipeline exist in the CSV.
+
+    For context_days=4 and target=Jul 14, the following must be present:
+        Jul 9  (input for eval Jul 10)
+        Jul 10 (ground truth for eval Jul 10, input for eval Jul 11)
+        Jul 11 (ground truth for eval Jul 11, input for eval Jul 12)
+        Jul 12 (ground truth for eval Jul 12, input for eval Jul 13)
+        Jul 13 (ground truth for eval Jul 13, input for deployment)
+
+    Args:
+        filepath:     Path to CSV file.
+        target_date:  ISO date string of the day to predict (must NOT be in CSV).
+        context_days: Number of previous days to evaluate.
+
+    Raises:
+        ValueError: If any required date is missing from the CSV.
+    """
+    df = pd.read_csv(filepath)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    unique_dates = set(df["datetime"].dt.date.unique())
+
+    tgt  = pd.Timestamp(target_date).date()
+    # Need context_days evaluation targets + their previous days
+    # e.g. context_days=4, target=Jul14 → need Jul9..Jul13
+    required = [
+        tgt - pd.Timedelta(days=i)
+        for i in range(1, context_days + 2)   # +2 to include the extra prev-day
+    ]
+    missing = [str(d) for d in required if d not in unique_dates]
+    if missing:
+        raise ValueError(
+            f"Context pipeline requires {context_days + 1} consecutive days before "
+            f"{target_date}. Missing from {filepath}: {missing}"
+        )
+    if tgt in unique_dates:
+        raise ValueError(
+            f"target_date={target_date} already exists in {filepath}. "
+            "Cannot predict a date that is already in the dataset."
+        )
+    logger.info(
+        "validate_context_dates: all required dates present for context_days=%d, "
+        "target=%s",
+        context_days, target_date,
+    )
+
+
+def load_deployment_input(
+    filepath: str,
+    target_date: str,
+) -> Tuple[List[float], str]:
+    """
+    Load x[t] for deployment — the day immediately before target_date.
+
+    target_date must NOT exist in the CSV (it is the future day to predict).
+
+    Args:
+        filepath:    Path to CSV file.
+        target_date: ISO date string of the day to predict.
+
+    Returns:
+        (x_t, target_date_str) — 24-value input list and target date string.
+    """
+    df = pd.read_csv(filepath)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime").reset_index(drop=True)
+
+    tgt  = pd.Timestamp(target_date).date()
+    prev = tgt - pd.Timedelta(days=1)
+
+    unique_dates = set(df["datetime"].dt.date.unique())
+    if prev not in unique_dates:
+        raise ValueError(
+            f"Cannot load deployment input: {prev} not found in {filepath}."
+        )
+
+    def _extract_day(date) -> List[float]:
+        rows = df[df["datetime"].dt.date == date]["traffic_volume"].tolist()
+        rows = rows[:24]
+        rows = rows + [0.0] * (24 - len(rows))
+        return [float(v) for v in rows]
+
+    x_t = _extract_day(prev)
+    logger.info(
+        "load_deployment_input: x_t=%s  target=%s", str(prev), str(tgt)
+    )
+    return x_t, str(tgt)
+
+
 # ── Synthetic data ────────────────────────────────────────────────────────────
 
 def generate_synthetic_data(seed: int = 42) -> Tuple[List[float], List[float], str]:

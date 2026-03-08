@@ -189,8 +189,9 @@ def api_call_refine(state: TrafficPredictionState) -> dict:
         prediction = list(state["y_hat_current"])
 
     # ── Increment iteration, update history ───────────────────────────────────
-    new_iteration = state["iteration"] + 1
-    new_history   = list(y_hat_history) + [prediction]
+    new_iteration       = state["iteration"] + 1
+    new_history         = list(y_hat_history) + [prediction]
+    new_prefine_history = state.get("prefine_history", []) + [prefine_instruction]
 
     log_node_result(
         logger,
@@ -206,6 +207,7 @@ def api_call_refine(state: TrafficPredictionState) -> dict:
         "y_hat_history":     new_history,
         "iteration":         new_iteration,
         "prefine_current":   prefine_instruction,
+        "prefine_history":   new_prefine_history,   # paper Eqn(5): p_refine,i history
         "api_calls_count":   state.get("api_calls_count", 0) + 1,
         "total_tokens_used": state.get("total_tokens_used", 0) + token_count,
     }

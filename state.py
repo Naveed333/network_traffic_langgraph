@@ -34,12 +34,14 @@ class TrafficPredictionState(TypedDict):
 
     # ── Refinement ────────────────────────────────────────────────────────────
     prefine_current: str         # Refinement instruction built from MAE trend analysis
+    prefine_history: List[str]   # All refinement instructions across iterations [r₀, r₁, …]
 
     # ── Control flow ──────────────────────────────────────────────────────────
     iteration: int               # Current refinement iteration index (incremented in refine node)
     max_iterations: int          # Hard upper bound on refinement iterations
     convergence_threshold: float # MAE Δ below which the pipeline is considered converged
     converged: bool              # True once a stop condition has been met
+    context_days: int            # Number of previous days evaluated as in-context examples
 
     # ── Telemetry ─────────────────────────────────────────────────────────────
     api_calls_count: int         # Running total of LLM API calls made

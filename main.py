@@ -36,13 +36,20 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from datetime import timedelta
+from typing import List, Optional
 
+import pandas as pd
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from config import settings
-from data.loader import generate_synthetic_data, load_traffic_data
+from data.loader import (
+    generate_synthetic_data,
+    load_deployment_input,
+    load_traffic_data,
+    validate_context_dates,
+)
 from evaluation.mae import compute_mae, compute_mape, compute_rmse
 from nodes.assemble_feedback import assemble_feedback
 from nodes.build_prompt import build_initial_prompt
@@ -51,6 +58,7 @@ from nodes.initial_predict import api_call_initial_predict
 from nodes.mae_feedback import api_call_mae_feedback
 from nodes.refine_predict import api_call_refine
 from nodes.sine_feedback import api_call_sine_feedback
+from prompts.initial_prompt_template import build_p_exam_from_contexts
 from state import TrafficPredictionState
 from utils.logger import setup_logger
 from utils.tracing import setup_tracing
@@ -179,11 +187,13 @@ def run_pipeline(
         "pfeed_history":      [],
         # Refinement
         "prefine_current":    "",
+        "prefine_history":    [],
         # Control
         "iteration":          0,
         "max_iterations":     max_iterations or settings.max_iterations,
         "convergence_threshold": convergence_threshold or settings.convergence_threshold,
         "converged":          False,
+        "context_days":       0,
         # Telemetry
         "api_calls_count":    0,
         "total_tokens_used":  0,
@@ -239,12 +249,208 @@ def run_pipeline(
         # Sine patterns
         "sine_fit_actual":     final_state.get("sine_fit_actual", ""),
         "sine_fit_predicted":  final_state.get("sine_fit_predicted", ""),
+        # Context pipeline fields (used by build_p_exam_from_contexts)
+        "x_t":                 final_state.get("x_t", []),
+        "ground_truth":        final_state.get("ground_truth", []),
+        "pfeed_history":       final_state.get("pfeed_history", []),
+        "prefine_history":     final_state.get("prefine_history", []),
     }
 
     # ── Print summary ─────────────────────────────────────────────────────────
     _print_summary(results)
 
     return results
+
+
+def build_deployment_graph() -> "CompiledGraph":  # noqa: F821
+    """
+    Compile a minimal 2-node graph used for the deployment prediction call.
+
+    Only NODE 1 (build_initial_prompt) and NODE 2 (initial_predict) run.
+    The full evaluation loop is skipped — context comes from saved histories.
+
+    Returns:
+        A compiled LangGraph application ready for ``.invoke()``.
+    """
+    workflow = StateGraph(TrafficPredictionState)
+    workflow.add_node("build_initial_prompt", build_initial_prompt)
+    workflow.add_node("initial_predict",      api_call_initial_predict)
+    workflow.set_entry_point("build_initial_prompt")
+    workflow.add_edge("build_initial_prompt", "initial_predict")
+    workflow.add_edge("initial_predict", END)
+    app = workflow.compile()
+    logger.info("Deployment graph compiled (2 nodes, no refinement loop)")
+    return app
+
+
+def run_context_pipeline(
+    data_path:             str,
+    target_date:           str,
+    context_days:          int,
+    max_iterations:        Optional[int]   = None,
+    convergence_threshold: Optional[float] = None,
+    thread_id:             str             = "default",
+) -> dict:
+    """
+    Full context-aware pipeline:
+
+    Phase 1 — Evaluation:
+        For each of the *context_days* days before target_date, run the
+        complete 7-node refinement pipeline and save the converged context.
+
+    Phase 2 — Deployment:
+        Load all saved contexts, build an enriched p_exam, then make a
+        single LLM call to predict target_date.
+
+    Args:
+        data_path:             Path to the hourly traffic CSV.
+        target_date:           ISO date string of the day to predict.
+        context_days:          Number of previous days to evaluate.
+        max_iterations:        Refinement loop limit for each evaluation day.
+        convergence_threshold: MAE Δ threshold for each evaluation day.
+        thread_id:             LangGraph thread ID prefix.
+
+    Returns:
+        Deployment result dict with final prediction and metadata.
+    """
+    setup_tracing()
+    sep = "=" * 70
+    logger.info(sep)
+    logger.info("Context-Aware Prediction Pipeline")
+    logger.info("Target: %s | Context days: %d | Max iterations: %d",
+                target_date,
+                context_days,
+                max_iterations or settings.max_iterations)
+    logger.info(sep)
+
+    # ── Step 1: Validate all required dates exist in CSV ──────────────────────
+    validate_context_dates(data_path, target_date, context_days)
+
+    # ── Step 2: Determine evaluation dates (oldest → newest) ──────────────────
+    tgt = pd.Timestamp(target_date).date()
+    eval_dates = [
+        str(tgt - timedelta(days=i))
+        for i in range(context_days, 0, -1)
+    ]
+    logger.info("Evaluation dates: %s", eval_dates)
+
+    # ── Step 3: Run full pipeline for each evaluation date ────────────────────
+    contexts: List[dict] = []
+    contexts_dir = os.path.join("results", "contexts")
+    os.makedirs(contexts_dir, exist_ok=True)
+
+    for i, eval_date in enumerate(eval_dates):
+        logger.info("%s", "-" * 60)
+        logger.info("EVALUATION %d/%d → %s", i + 1, context_days, eval_date)
+
+        result = run_pipeline(
+            data_path=data_path,
+            target_date=eval_date,
+            max_iterations=max_iterations,
+            convergence_threshold=convergence_threshold,
+            thread_id=f"{thread_id}_ctx_{eval_date}",
+        )
+
+        # Enrich result with eval_date for context builder
+        result["eval_date"] = eval_date
+
+        # Save individual context to disk
+        ctx_path = os.path.join(contexts_dir, f"{eval_date}.json")
+        with open(ctx_path, "w", encoding="utf-8") as fh:
+            json.dump(result, fh, indent=2, default=str)
+        logger.info("Saved context → %s", ctx_path)
+
+        contexts.append(result)
+
+    # ── Step 4: Build enriched p_exam from all converged contexts ─────────────
+    logger.info("%s", "=" * 70)
+    logger.info("DEPLOYMENT — building enriched p_exam from %d contexts", len(contexts))
+    enriched_p_exam = build_p_exam_from_contexts(contexts)
+
+    # ── Step 5: Load x[t] for deployment (day before target) ──────────────────
+    x_t, resolved_target = load_deployment_input(data_path, target_date)
+
+    # ── Step 6: Build deployment state with enriched p_exam ───────────────────
+    deploy_state: TrafficPredictionState = {
+        "x_t":                   x_t,
+        "ground_truth":          [],          # unknown — future day
+        "target_date":           resolved_target,
+        "p_exam":                enriched_p_exam,
+        "p_input":               "",          # built by NODE 1
+        "p_ques":                "",          # built by NODE 1
+        "y_hat_current":         [],
+        "y_hat_history":         [],
+        "mae_score":             float("inf"),
+        "mae_history":           [],
+        "sine_fit_actual":       "",
+        "sine_fit_predicted":    "",
+        "pfeed_current":         "",
+        "pfeed_history":         [],
+        "prefine_current":       "",
+        "prefine_history":       [],
+        "iteration":             0,
+        "max_iterations":        1,
+        "convergence_threshold": convergence_threshold or settings.convergence_threshold,
+        "converged":             False,
+        "context_days":          context_days,
+        "api_calls_count":       0,
+        "total_tokens_used":     0,
+    }
+
+    # ── Step 7: Single LLM call via deployment graph ──────────────────────────
+    app = build_deployment_graph()
+    logger.info("Invoking deployment graph | target=%s", resolved_target)
+    final_state = app.invoke(deploy_state)
+
+    # ── Step 8: Compile deployment result ─────────────────────────────────────
+    eval_api_calls = sum(c.get("total_api_calls", 0) for c in contexts)
+    deploy_result = {
+        # Core
+        "mode":               "context_pipeline",
+        "target_date":        resolved_target,
+        "context_days":       context_days,
+        "y_final":            final_state["y_hat_current"],
+        # Metadata
+        "eval_dates":         eval_dates,
+        "eval_mae_finals":    [c.get("final_mae") for c in contexts],
+        "total_eval_api_calls":   eval_api_calls,
+        "deploy_api_calls":   1,
+        "total_api_calls":    eval_api_calls + 1,
+        "total_tokens_used":  (
+            sum(c.get("total_tokens_used", 0) for c in contexts)
+            + final_state.get("total_tokens_used", 0)
+        ),
+        "note": (
+            f"Predicted using {context_days} converged evaluation contexts "
+            f"as in-context learning examples."
+        ),
+    }
+
+    _print_deployment_summary(deploy_result)
+    return deploy_result
+
+
+def _print_deployment_summary(results: dict) -> None:
+    """Print a formatted deployment result summary."""
+    sep = "─" * 70
+    logger.info(sep)
+    logger.info("CONTEXT PIPELINE COMPLETE")
+    logger.info(sep)
+    logger.info("Target date          : %s", results["target_date"])
+    logger.info("Context days used    : %d  (%s)",
+                results["context_days"],
+                ", ".join(results["eval_dates"]))
+    logger.info("Eval final MAEs      : %s",
+                [f"{m:.4f}" for m in results["eval_mae_finals"] if m])
+    logger.info(sep)
+    logger.info("Total API calls      : %d  (eval=%d + deploy=1)",
+                results["total_api_calls"],
+                results["total_eval_api_calls"])
+    logger.info("Total tokens used    : %d", results["total_tokens_used"])
+    logger.info(sep)
+    logger.info("Final prediction (ŷ): %s",
+                ", ".join(f"{v:.2f}" for v in results["y_final"]))
+    logger.info(sep)
 
 
 def _print_summary(results: dict) -> None:
@@ -309,19 +515,44 @@ def _parse_args() -> argparse.Namespace:
         "--output", type=str, default=None,
         help="Path to save results as JSON (e.g. results/run_001.json).",
     )
+    parser.add_argument(
+        "--context-days", type=int, default=None,
+        help=(
+            "Number of previous days to evaluate as in-context learning examples "
+            "before predicting --target-date. When set, the full context pipeline "
+            "runs: evaluate N days → save contexts → single deployment prediction. "
+            "Requires --data-path and --target-date."
+        ),
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
 
-    results = run_pipeline(
-        data_path=args.data_path,
-        target_date=args.target_date,
-        max_iterations=args.max_iterations,
-        convergence_threshold=args.convergence_threshold,
-        thread_id=args.thread_id,
-    )
+    # ── Route: context pipeline vs single evaluation ───────────────────────────
+    if args.context_days:
+        if not args.data_path or not args.target_date:
+            logger.error(
+                "--context-days requires both --data-path and --target-date"
+            )
+            sys.exit(1)
+        results = run_context_pipeline(
+            data_path=args.data_path,
+            target_date=args.target_date,
+            context_days=args.context_days,
+            max_iterations=args.max_iterations,
+            convergence_threshold=args.convergence_threshold,
+            thread_id=args.thread_id,
+        )
+    else:
+        results = run_pipeline(
+            data_path=args.data_path,
+            target_date=args.target_date,
+            max_iterations=args.max_iterations,
+            convergence_threshold=args.convergence_threshold,
+            thread_id=args.thread_id,
+        )
 
     if args.output:
         out_dir = os.path.dirname(args.output)
