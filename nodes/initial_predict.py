@@ -42,10 +42,12 @@ def api_call_initial_predict(state: TrafficPredictionState) -> dict:
     log_node_entry(logger, "initial_predict", state["iteration"])
 
     # ── Build LCEL chain ──────────────────────────────────────────────────────
+    # max_tokens=None: reasoning models manage their own completion budget;
+    # capping it can starve the visible-output phase and produce empty responses.
     llm = ChatOpenAI(
         model=settings.model_name,
         temperature=settings.temperature,
-        max_tokens=settings.max_tokens,
+        max_tokens=None,
         api_key=settings.openai_api_key,
     )
     chain = INITIAL_PREDICTION_TEMPLATE | llm | StrOutputParser()

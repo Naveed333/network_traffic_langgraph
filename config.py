@@ -14,13 +14,33 @@ from pydantic_settings import BaseSettings
 # (e.g. "GPT-4.1 mini", "gpt4o", "gpt-4o mini") and normalise to the
 # canonical kebab-case IDs the API actually accepts.
 _MODEL_ALIASES: dict[str, str] = {
+    # GPT-4o family
     "gpt4o":        "gpt-4o",
     "gpt-4o":       "gpt-4o",
+    "gpt-4o-mini":  "gpt-4o-mini",
+    "gpt4omini":    "gpt-4o-mini",
+    # GPT-4.1 family
     "gpt-4.1":      "gpt-4.1",
     "gpt4.1":       "gpt-4.1",
     "gpt-4.1mini":  "gpt-4.1-mini",
     "gpt4.1mini":   "gpt-4.1-mini",
     "gpt-4.1-mini": "gpt-4.1-mini",
+    # GPT-5 family (reasoning models — 400k context window)
+    "gpt-5":        "gpt-5",
+    "gpt5":         "gpt-5",
+    "gpt-5-mini":   "gpt-5-mini",
+    "gpt5mini":     "gpt-5-mini",
+    "gpt5-mini":    "gpt-5-mini",
+}
+
+# Context window sizes per model family — used to auto-configure the guard
+_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-4o":       128_000,
+    "gpt-4o-mini":  128_000,
+    "gpt-4.1":      128_000,
+    "gpt-4.1-mini": 128_000,
+    "gpt-5":        400_000,
+    "gpt-5-mini":   400_000,
 }
 
 
@@ -59,7 +79,17 @@ class Settings(BaseSettings):
     convergence_threshold: float = Field(default=0.5, env="CONVERGENCE_THRESHOLD")
 
     # ── Context window guard ──────────────────────────────────────────────────
-    context_window_limit: int = Field(default=128_000, env="CONTEXT_WINDOW_LIMIT")
+    # Default 0 means "auto-detect from model name"; set explicitly in .env to override.
+    context_window_limit: int = Field(default=0, env="CONTEXT_WINDOW_LIMIT")
+
+    @field_validator("context_window_limit", mode="after")
+    @classmethod
+    def auto_context_window(cls, v: int, info) -> int:
+        """If context_window_limit is 0 (default), infer it from the model name."""
+        if v != 0:
+            return v
+        model = info.data.get("model_name", "gpt-4o")
+        return _MODEL_CONTEXT_WINDOWS.get(model, 128_000)
     context_window_guard_pct: float = Field(default=0.8, env="CONTEXT_WINDOW_GUARD_PCT")
 
     # ── Data ──────────────────────────────────────────────────────────────────

@@ -142,10 +142,14 @@ def api_call_refine(state: TrafficPredictionState) -> dict:
         )
 
     # ── Build LCEL chain ──────────────────────────────────────────────────────
+    # max_tokens=None: reasoning models (gpt-5-mini, o-series) use an internal
+    # chain-of-thought that counts against the completion budget; capping it
+    # causes empty visible output.  Passing None lets the model manage its own
+    # budget — the context-window guard above already ensures the INPUT fits.
     llm = ChatOpenAI(
         model=settings.model_name,
         temperature=settings.temperature,
-        max_tokens=settings.max_tokens,
+        max_tokens=None,
         api_key=settings.openai_api_key,
     )
     chain = REFINEMENT_TEMPLATE | llm | StrOutputParser()
