@@ -55,10 +55,12 @@ def api_call_sine_feedback(state: TrafficPredictionState) -> dict:
     )
 
     # ── Build LCEL chain ──────────────────────────────────────────────────────
+    # max_tokens raised to 2048 — reasoning models spend tokens internally;
+    # 512 was too low and caused truncated / empty responses.
     llm = ChatOpenAI(
         model=settings.model_name,
         temperature=0.1,
-        max_tokens=512,
+        max_tokens=2048,
         api_key=settings.openai_api_key,
     )
     chain = SINE_FIT_TEMPLATE | llm | StrOutputParser()
@@ -75,6 +77,10 @@ def api_call_sine_feedback(state: TrafficPredictionState) -> dict:
                     "predicted_values": predicted_str,
                 }
             )
+            # Log raw response at DEBUG so format mismatches are visible
+            logger.debug(
+                "sine_feedback: raw response (attempt %d): %r", attempt, response[:400]
+            )
             f_act, f_pred = parse_sine_strings(response)
             if f_act and f_pred:
                 logger.debug(
@@ -82,8 +88,9 @@ def api_call_sine_feedback(state: TrafficPredictionState) -> dict:
                 )
                 break
             logger.warning(
-                "sine_feedback: parse failed on attempt %d/%d — retrying",
-                attempt, MAX_RETRIES,
+                "sine_feedback: parse failed on attempt %d/%d — retrying "
+                "(raw snippet: %r)",
+                attempt, MAX_RETRIES, response[:150],
             )
         except Exception as exc:
             logger.error(

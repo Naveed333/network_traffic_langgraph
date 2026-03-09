@@ -53,10 +53,13 @@ def api_call_mae_feedback(state: TrafficPredictionState) -> dict:
     )
 
     # ── Build LCEL chain (temperature=0 for deterministic math) ──────────────
+    # max_tokens set to 1024 — reasoning models (gpt-5-mini, o-series) consume
+    # tokens internally before producing visible output; 256 was too tight and
+    # caused empty-string responses.
     llm = ChatOpenAI(
         model=settings.model_name,
         temperature=0.0,
-        max_tokens=256,
+        max_tokens=1024,
         api_key=settings.openai_api_key,
     )
     chain = MAE_CALCULATION_TEMPLATE | llm | StrOutputParser()
@@ -72,6 +75,10 @@ def api_call_mae_feedback(state: TrafficPredictionState) -> dict:
                     "num_points":       24,
                 }
             )
+            # Log raw response at DEBUG so empty/unexpected replies are visible
+            logger.debug(
+                "mae_feedback: raw response (attempt %d): %r", attempt, response[:300]
+            )
             mae_score = parse_float(response)
             if mae_score is not None:
                 logger.debug(
@@ -79,8 +86,9 @@ def api_call_mae_feedback(state: TrafficPredictionState) -> dict:
                 )
                 break
             logger.warning(
-                "mae_feedback: parse failed on attempt %d/%d — retrying",
-                attempt, MAX_RETRIES,
+                "mae_feedback: parse failed on attempt %d/%d — retrying "
+                "(raw snippet: %r)",
+                attempt, MAX_RETRIES, response[:120],
             )
         except Exception as exc:
             logger.error(

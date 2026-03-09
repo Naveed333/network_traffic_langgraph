@@ -37,31 +37,38 @@ MAE_CALCULATION_TEMPLATE = PromptTemplate(
 )
 
 # ── Sine / cosine fitting template ────────────────────────────────────────────
+# Output is requested as JSON so parse_sine_strings can reliably extract
+# f_act and f_pred regardless of model verbosity or formatting style.
 
 SINE_FIT_TEMPLATE = PromptTemplate(
     input_variables=["actual_values", "predicted_values"],
     template=(
         "You are an expert signal-processing assistant specialising in fitting "
         "periodic functions to time-series data.\n\n"
-        "Fit a sine/cosine model of the form:\n"
-        "    f(t) = A × sin(ω × t + φ) + C\n"
-        "to each of the two 24-point (t = 0 … 23) network traffic sequences "
+        "Fit a sine model of the form:\n"
+        "    f(t) = A * sin(omega * t + phi) + C\n"
+        "to each of the two 24-point (t = 0 to 23) network traffic sequences "
         "given below.\n\n"
         "Parameter definitions:\n"
-        "  A  = amplitude      (half the peak-to-trough range)\n"
-        "  ω  = angular freq   (for a 24-hour period: ω ≈ 2π/24 ≈ 0.2618 rad/h)\n"
-        "  φ  = phase shift    (radians; adjust so the model peak aligns with data)\n"
-        "  C  = vertical offset (mean of the sequence)\n\n"
-        "Actual traffic (Mbps, hours 0–23):\n"
+        "  A     = amplitude       (half the peak-to-trough range, always >= 0)\n"
+        "  omega = angular freq    (for a 24-hour period: omega = 2*pi/24 = 0.2618)\n"
+        "  phi   = phase shift     (radians; adjust so the peak aligns with data)\n"
+        "  C     = vertical offset (mean of the sequence)\n\n"
+        "Actual traffic (Mbps, hours 0-23):\n"
         "{actual_values}\n\n"
-        "Predicted traffic (Mbps, hours 0–23):\n"
+        "Predicted traffic (Mbps, hours 0-23):\n"
         "{predicted_values}\n\n"
-        "Respond in EXACTLY this two-line format with numeric values only "
-        "(no extra text before, between, or after):\n"
-        "f_act: A_actual × sin(ω_actual × t + φ_actual) + C_actual\n"
-        "f_pred: A_pred × sin(ω_pred × t + φ_pred) + C_pred\n\n"
-        "Example:\n"
-        "f_act: 210.34 * sin(0.2618 * t - 1.5708) + 623.45\n"
-        "f_pred: 195.72 * sin(0.2618 * t - 1.4320) + 605.88"
+        "Instructions:\n"
+        "  1. Compute A as half the (max - min) of the sequence.\n"
+        "  2. Set C as the mean of the sequence.\n"
+        "  3. Set omega = 0.2618 (fixed daily cycle).\n"
+        "  4. Estimate phi so the sine peak aligns with the data peak.\n"
+        "  5. Format each formula as: A * sin(omega * t + phi) + C\n"
+        "     using only plain ASCII characters and * for multiplication.\n\n"
+        "Respond with ONLY valid JSON — no extra text, no markdown fences:\n"
+        '{{"f_act": "<formula for actual>", "f_pred": "<formula for predicted>"}}\n\n'
+        "Example response:\n"
+        '{{"f_act": "210.34 * sin(0.2618 * t - 1.5708) + 623.45", '
+        '"f_pred": "195.72 * sin(0.2618 * t - 1.4320) + 605.88"}}'
     ),
 )
