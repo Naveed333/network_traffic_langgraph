@@ -56,7 +56,7 @@ def api_call_sine_feedback(state: TrafficPredictionState) -> dict:
         "sine_feedback",
         state["iteration"],
         token_count=token_count,
-        parsed_output=f"f_act={f_act[:60]}…",
+        parsed_output=f"f_act={f_act[:50]}… | f_pred={f_pred[:50]}…",
     )
 
     return {
